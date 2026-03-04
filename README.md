@@ -376,6 +376,10 @@ The authors of this software make no guarantees about continued access to Amazon
 
 Contributions are welcome! Please open an issue or pull request on GitHub.
 
+## Support
+
+This tool is free and always will be. I don't accept donations or payment — but if you're an author and you've read one of my books, an honest review would mean the world. Check out my work at [randypellegrini.com](https://randypellegrini.com).
+
 ## License
 
 MIT License. See [LICENSE](LICENSE) for details.
