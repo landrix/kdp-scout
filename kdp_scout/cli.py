@@ -1176,6 +1176,348 @@ def discover(asin, top_n):
         engine.close()
 
 
+# -- Trending command ------------------------------------------------------
+
+
+@main.command('trending')
+@click.option(
+    '--source',
+    type=click.Choice(['bestsellers', 'google', 'both']),
+    default='both',
+    help='Discovery source: bestsellers, google suggest, or both.',
+)
+@click.option(
+    '--list-type',
+    type=click.Choice(['kindle', 'kindle_free', 'kindle_new', 'kindle_movers']),
+    default='kindle',
+    help='Bestseller list to scrape.',
+)
+@click.option(
+    '--limit',
+    default=50,
+    type=int,
+    help='Maximum keywords to display.',
+)
+@click.option(
+    '--save/--no-save',
+    default=True,
+    help='Save discovered keywords to database.',
+)
+def trending(source, list_type, limit, save):
+    """Discover trending keywords without a seed phrase.
+
+    Finds popular keywords by scraping Amazon bestseller pages
+    and/or querying Google suggest with book-related patterns.
+
+    No seed keyword required - this automatically discovers what's
+    trending in the Kindle marketplace.
+
+    Examples:
+        kdp-scout trending
+        kdp-scout trending --source bestsellers --list-type kindle_movers
+        kdp-scout trending --source google --limit 100
+        kdp-scout trending --no-save
+    """
+    from kdp_scout.collectors.trending import (
+        scrape_bestseller_keywords, discover_trending_keywords,
+    )
+    from kdp_scout.keyword_engine import mine_keywords
+    from kdp_scout.db import KeywordRepository, init_db
+
+    console.print(
+        Panel(
+            f'[bold]Source:[/bold] {source}\n'
+            f'[bold]Bestseller list:[/bold] {list_type}\n'
+            f'[bold]Save to DB:[/bold] {"Yes" if save else "No"}',
+            title='[bold cyan]KDP Scout - Trending Discovery[/bold cyan]',
+            border_style='cyan',
+        )
+    )
+    console.print()
+
+    all_keywords = {}
+
+    # Bestseller scraping
+    if source in ('bestsellers', 'both'):
+        console.print('[bold]Phase 1:[/bold] Scraping Amazon bestseller page...\n')
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn('[progress.description]{task.description}'),
+            BarColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task(f'Scraping {list_type} bestsellers...', total=1)
+
+            try:
+                bs_results = scrape_bestseller_keywords(
+                    list_type=list_type,
+                    progress_callback=lambda c, t: progress.update(task, completed=c, total=t),
+                )
+            except Exception as e:
+                console.print(f'[red]Error scraping bestsellers: {e}[/red]')
+                bs_results = []
+
+        for kw, info in bs_results:
+            if kw not in all_keywords:
+                all_keywords[kw] = {'source': 'bestseller', 'info': info}
+
+        console.print(
+            f'  [green]{len(bs_results)} keywords from bestsellers[/green]\n'
+        )
+
+    # Google suggest trending
+    if source in ('google', 'both'):
+        console.print('[bold]Phase 2:[/bold] Discovering trending topics via Google suggest...\n')
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn('[progress.description]{task.description}'),
+            BarColumn(),
+            TextColumn('[progress.percentage]{task.percentage:>3.0f}%'),
+            TextColumn('({task.completed}/{task.total})'),
+            console=console,
+        ) as progress:
+            task = progress.add_task('Querying Google suggest...', total=84)
+
+            try:
+                gs_results = discover_trending_keywords(
+                    progress_callback=lambda c, t: progress.update(task, completed=c, total=t),
+                )
+            except Exception as e:
+                console.print(f'[red]Error querying Google suggest: {e}[/red]')
+                gs_results = []
+
+        for kw, pos in gs_results:
+            if kw not in all_keywords:
+                all_keywords[kw] = {'source': 'google_suggest', 'position': pos}
+
+        console.print(
+            f'  [green]{len(gs_results)} keywords from Google suggest[/green]\n'
+        )
+
+    if not all_keywords:
+        console.print('[yellow]No keywords discovered. Try again later or use a different source.[/yellow]')
+        return
+
+    # Save to database
+    saved_count = 0
+    if save:
+        init_db()
+        repo = KeywordRepository()
+        try:
+            for kw, meta in all_keywords.items():
+                keyword_id, is_new = repo.upsert_keyword(
+                    kw, source=meta['source'], category='trending',
+                )
+                pos = meta.get('position')
+                if pos:
+                    repo.add_metric(keyword_id, autocomplete_position=pos)
+                if is_new:
+                    saved_count += 1
+        finally:
+            repo.close()
+
+    # Display results
+    table = Table(
+        title=f'Trending Keywords ({len(all_keywords)} discovered)',
+        show_lines=False,
+    )
+    table.add_column('#', style='dim', width=4, justify='right')
+    table.add_column('Keyword', style='bold', min_width=25)
+    table.add_column('Source', justify='center', width=16)
+
+    for i, (kw, meta) in enumerate(list(all_keywords.items())[:limit], 1):
+        source_label = meta['source'].replace('_', ' ').title()
+        table.add_row(str(i), kw, source_label)
+
+    console.print(table)
+
+    # Summary
+    console.print()
+    summary_table = Table(show_header=False, box=None, padding=(0, 2))
+    summary_table.add_column('Label', style='bold')
+    summary_table.add_column('Value', style='green')
+    summary_table.add_row('Total discovered', str(len(all_keywords)))
+    if save:
+        summary_table.add_row('New keywords saved', str(saved_count))
+
+    console.print(
+        Panel(summary_table, title='[bold green]Discovery Summary[/bold green]', border_style='green')
+    )
+
+    console.print(
+        '\n[dim]Tip: Run "kdp-scout score" to score these keywords, '
+        'or "kdp-scout mine <keyword>" to expand any interesting ones.[/dim]'
+    )
+
+
+# -- Mine Categories command -----------------------------------------------
+
+
+@main.command('mine-categories')
+@click.option(
+    '--categories',
+    default=None,
+    help='Comma-separated list of categories to mine (default: all built-in).',
+)
+@click.option(
+    '--depth',
+    type=click.IntRange(1, 2),
+    default=1,
+    help='Mining depth per category.',
+)
+@click.option(
+    '--department',
+    type=click.Choice(['kindle', 'books', 'all']),
+    default='kindle',
+    help='Amazon department to search.',
+)
+@click.option(
+    '--limit-categories',
+    type=int,
+    default=None,
+    help='Only mine the first N categories (useful for testing).',
+)
+def mine_categories(categories, depth, department, limit_categories):
+    """Auto-mine keywords across major KDP book categories.
+
+    Runs autocomplete mining for each category in the built-in list
+    (or a custom list), building a comprehensive keyword database
+    without manual seed entry.
+
+    This is equivalent to running "kdp-scout mine" once for each
+    category, but automated.
+
+    Examples:
+        kdp-scout mine-categories
+        kdp-scout mine-categories --depth 2
+        kdp-scout mine-categories --categories "romance,thriller,mystery"
+        kdp-scout mine-categories --limit-categories 5
+    """
+    from kdp_scout.collectors.trending import get_category_seeds
+    from kdp_scout.keyword_engine import mine_keywords
+
+    # Determine category list
+    if categories:
+        cat_list = [c.strip() for c in categories.split(',') if c.strip()]
+    else:
+        cat_list = get_category_seeds()
+
+    if limit_categories:
+        cat_list = cat_list[:limit_categories]
+
+    console.print(
+        Panel(
+            f'[bold]Categories:[/bold] {len(cat_list)}\n'
+            f'[bold]Depth:[/bold] {depth}\n'
+            f'[bold]Department:[/bold] {department}\n'
+            f'[bold]Est. queries:[/bold] ~{len(cat_list) * 27 * depth:,}',
+            title='[bold cyan]KDP Scout - Category Mining[/bold cyan]',
+            border_style='cyan',
+        )
+    )
+    console.print()
+
+    # Show categories being mined
+    cat_preview = ', '.join(cat_list[:10])
+    if len(cat_list) > 10:
+        cat_preview += f', ... (+{len(cat_list) - 10} more)'
+    console.print(f'[dim]Categories: {cat_preview}[/dim]\n')
+
+    total_new = 0
+    total_existing = 0
+    total_mined = 0
+    category_results = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn('[progress.description]{task.description}'),
+        BarColumn(),
+        TextColumn('[progress.percentage]{task.percentage:>3.0f}%'),
+        TextColumn('({task.completed}/{task.total})'),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        cat_task = progress.add_task(
+            'Mining categories...', total=len(cat_list)
+        )
+
+        for cat in cat_list:
+            progress.update(
+                cat_task,
+                description=f'Mining "{cat}"...',
+            )
+
+            try:
+                result = mine_keywords(
+                    seed=cat,
+                    depth=depth,
+                    department=department,
+                )
+
+                total_new += result['new_count']
+                total_existing += result['existing_count']
+                total_mined += result['total_mined']
+
+                category_results.append({
+                    'category': cat,
+                    'total': result['total_mined'],
+                    'new': result['new_count'],
+                })
+
+            except KeyboardInterrupt:
+                console.print(
+                    '\n[yellow]Interrupted. Partial results have been saved.[/yellow]'
+                )
+                break
+            except Exception as e:
+                console.print(f'\n[red]Error mining "{cat}": {e}[/red]')
+                category_results.append({
+                    'category': cat,
+                    'total': 0,
+                    'new': 0,
+                    'error': str(e),
+                })
+
+            progress.advance(cat_task)
+
+    # Results summary
+    console.print()
+
+    summary_table = Table(show_header=False, box=None, padding=(0, 2))
+    summary_table.add_column('Label', style='bold')
+    summary_table.add_column('Value', style='green')
+    summary_table.add_row('Categories mined', str(len(category_results)))
+    summary_table.add_row('Total keywords found', str(total_mined))
+    summary_table.add_row('New keywords', str(total_new))
+    summary_table.add_row('Already in database', str(total_existing))
+
+    console.print(
+        Panel(summary_table, title='[bold green]Category Mining Summary[/bold green]', border_style='green')
+    )
+
+    # Top categories by new keywords
+    if category_results:
+        console.print()
+        top_cats = sorted(category_results, key=lambda x: x['new'], reverse=True)[:15]
+        cat_table = Table(title='Top Categories by New Keywords', show_lines=False)
+        cat_table.add_column('Category', style='bold', min_width=25)
+        cat_table.add_column('Total', justify='right', width=8)
+        cat_table.add_column('New', justify='right', width=8, style='green')
+
+        for cat in top_cats:
+            cat_table.add_row(cat['category'], str(cat['total']), str(cat['new']))
+
+        console.print(cat_table)
+
+    console.print(
+        '\n[dim]Tip: Run "kdp-scout score" to score all keywords, '
+        'then "kdp-scout report keywords" for the full ranked list.[/dim]'
+    )
+    console.print(f'[dim]Database: {Config.get_db_path()}[/dim]')
+
+
 # -- Phase 5: Automation, Seeds, Cron --------------------------------------
 
 from kdp_scout.cli_automation import automate, seeds, cron
