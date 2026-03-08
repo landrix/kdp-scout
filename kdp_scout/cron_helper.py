@@ -57,7 +57,7 @@ def _get_kdp_scout_path():
         pass
 
     # Fallback: use python -m invocation
-    return f'{_get_python_path()} -m kdp_scout.cli'
+    return f'{_get_python_path()} -m kdp_scout'
 
 
 def _get_log_path():

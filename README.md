@@ -52,9 +52,13 @@ Built for self-published authors who want data-driven keyword targeting without 
 ```bash
 git clone https://github.com/rxpelle/kdp-scout.git
 cd kdp-scout
+python3 -m venv .venv
+source .venv/bin/activate    # On Windows: .venv\Scripts\activate
 pip install -e .
 kdp-scout config init
 ```
+
+> **Note:** You need to activate the virtual environment (`source .venv/bin/activate`) each time you open a new terminal before running `kdp-scout` commands.
 
 Copy the example environment file and configure:
 
@@ -318,6 +322,18 @@ crontab -l
 # Logs go to data/automation.log
 tail -f data/automation.log
 ```
+
+## Troubleshooting
+
+### `kdp-scout: command not found`
+
+1. **Are you in the virtual environment?** Run `source .venv/bin/activate` first.
+2. **Alternative:** Run `python -m kdp_scout` instead of `kdp-scout`.
+3. **Check pip's install location:** Run `pip show -f kdp-scout` and verify the script directory is on your PATH.
+
+### Windows: program flashes and closes
+
+Don't double-click Python files. Open Command Prompt or PowerShell, navigate to the kdp-scout folder, activate the venv, and run commands from there.
 
 ## Architecture
 
