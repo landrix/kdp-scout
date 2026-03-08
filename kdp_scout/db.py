@@ -388,7 +388,8 @@ class KeywordRepository:
             SELECT k.id, k.keyword, k.source, k.first_seen, k.category, k.score,
                    km.autocomplete_position, km.snapshot_date,
                    km.estimated_volume, km.competition_count,
-                   km.avg_bsr_top_results, km.impressions, km.clicks, km.orders
+                   km.avg_bsr_top_results, km.suggested_bid,
+                   km.impressions, km.clicks, km.orders
             FROM keywords k
             LEFT JOIN keyword_metrics km ON k.id = km.keyword_id
                 AND km.snapshot_date = (
@@ -399,6 +400,92 @@ class KeywordRepository:
             WHERE k.id = ?
         """
         return self._conn.execute(query, (keyword_id,)).fetchone()
+
+    def get_ads_data_for_keyword(self, keyword_text):
+        """Get aggregated ads data for a keyword from ads_search_terms.
+
+        Cross-references the keyword text against the ads_search_terms table
+        to get all advertising performance data, aggregated across report dates.
+
+        Args:
+            keyword_text: The keyword string to look up.
+
+        Returns:
+            Dict with 'impressions', 'clicks', 'orders', 'spend', 'sales'
+            (all summed), or None if no matching rows exist.
+        """
+        row = self._conn.execute(
+            """
+            SELECT SUM(impressions) as impressions,
+                   SUM(clicks) as clicks,
+                   SUM(orders) as orders,
+                   SUM(spend) as spend,
+                   SUM(sales) as sales
+            FROM ads_search_terms
+            WHERE LOWER(search_term) = LOWER(?)
+            """,
+            (keyword_text,),
+        ).fetchone()
+        if row and row['impressions'] is not None:
+            return {
+                'impressions': row['impressions'],
+                'clicks': row['clicks'],
+                'orders': row['orders'],
+                'spend': row['spend'],
+                'sales': row['sales'],
+            }
+        return None
+
+    def get_ads_acos_for_keyword(self, keyword_text):
+        """Get aggregated ACOS for a keyword from ads_search_terms.
+
+        Cross-references the keyword text against the ads_search_terms table
+        to find advertising cost of sales data.
+
+        Args:
+            keyword_text: The keyword string to look up.
+
+        Returns:
+            Float ACOS value (as decimal, e.g. 0.35 for 35%), or None.
+        """
+        row = self._conn.execute(
+            """
+            SELECT CASE WHEN SUM(sales) > 0
+                THEN SUM(spend) / SUM(sales)
+                ELSE NULL END as acos
+            FROM ads_search_terms
+            WHERE LOWER(search_term) = LOWER(?)
+            """,
+            (keyword_text,),
+        ).fetchone()
+        if row and row['acos'] is not None:
+            return row['acos']
+        return None
+
+    def get_own_ranking_for_keyword(self, keyword_id):
+        """Get the best ranking position for own books on this keyword.
+
+        Cross-references the keyword_rankings table filtered to books
+        marked as is_own=1.
+
+        Args:
+            keyword_id: ID of the keyword.
+
+        Returns:
+            Integer rank position (best/lowest), or None if not ranked.
+        """
+        row = self._conn.execute(
+            """
+            SELECT MIN(kr.rank_position) as best_rank
+            FROM keyword_rankings kr
+            JOIN books b ON kr.book_id = b.id
+            WHERE kr.keyword_id = ? AND b.is_own = 1
+            """,
+            (keyword_id,),
+        ).fetchone()
+        if row and row['best_rank'] is not None:
+            return row['best_rank']
+        return None
 
     def update_score(self, keyword_id, score):
         """Update the score for a keyword.

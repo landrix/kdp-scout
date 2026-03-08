@@ -659,6 +659,110 @@ def score(recalculate):
         scorer.close()
 
 
+@main.command('explain')
+@click.argument('keyword')
+def explain(keyword):
+    """Explain the score breakdown for a keyword.
+
+    Shows each scoring component with raw value, normalized score (0-1),
+    weight, and weighted contribution to the final 0-100 score.
+
+    Examples:
+        kdp-scout explain "historical fiction"
+        kdp-scout explain "thriller books"
+    """
+    from kdp_scout.keyword_engine import KeywordScorer
+    from kdp_scout.db import KeywordRepository
+
+    repo = KeywordRepository()
+    scorer = KeywordScorer()
+    try:
+        kw_row = repo.find_by_keyword(keyword)
+        if kw_row is None:
+            console.print(
+                f'[red]Keyword "{keyword}" not found in database.[/red]'
+            )
+            return
+
+        result = scorer.score_keyword_detailed(kw_row['id'])
+
+        # Build the breakdown table
+        table = Table(
+            title=f'Score Breakdown: "{keyword}"',
+            show_lines=True,
+            expand=True,
+        )
+        table.add_column('Component', style='bold', width=20)
+        table.add_column('Raw Value', justify='right', width=18)
+        table.add_column('Normalized', justify='right', width=10)
+        table.add_column('Weight', justify='right', width=8)
+        table.add_column('Weighted', justify='right', width=8)
+        table.add_column('Bar', width=22)
+
+        component_order = [
+            'autocomplete', 'competition', 'bsr_demand',
+            'ads_impressions', 'ads_orders', 'ads_profitability',
+            'search_volume', 'commercial_value', 'click_through_rate',
+            'own_ranking',
+        ]
+
+        for name in component_order:
+            comp = result['components'][name]
+            raw = comp['description']
+            norm_str = f"{comp['score']:.2f}"
+            weight_str = f"{comp['weight']:.2f}"
+            weighted_str = f"{comp['weighted']:.1f}"
+
+            # Visual bar (20 chars wide)
+            bar_len = int(comp['score'] * 20)
+            bar = '[green]' + '#' * bar_len + '[/green]' + '[dim]' + '-' * (20 - bar_len) + '[/dim]'
+
+            # Color the normalized score
+            if comp['score'] >= 0.7:
+                norm_display = f'[green]{norm_str}[/green]'
+            elif comp['score'] >= 0.3:
+                norm_display = f'[yellow]{norm_str}[/yellow]'
+            elif comp['score'] > 0:
+                norm_display = f'[dim]{norm_str}[/dim]'
+            else:
+                norm_display = f'[dim]0.00[/dim]'
+
+            display_name = name.replace('_', ' ').title()
+
+            table.add_row(
+                display_name, raw, norm_display,
+                weight_str, weighted_str, bar,
+            )
+
+        console.print()
+        console.print(table)
+
+        # Total score panel
+        total = result['total']
+        if total >= 75:
+            total_style = 'bold green'
+        elif total >= 50:
+            total_style = 'green'
+        elif total >= 25:
+            total_style = 'yellow'
+        else:
+            total_style = 'dim'
+
+        console.print(
+            Panel(
+                f'[{total_style}]{total:.1f} / 100[/{total_style}]',
+                title='[bold]Total Score[/bold]',
+                border_style='cyan',
+                expand=False,
+            )
+        )
+        console.print()
+
+    finally:
+        repo.close()
+        scorer.close()
+
+
 # -- Report command group --------------------------------------------------
 
 

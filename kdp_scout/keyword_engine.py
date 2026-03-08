@@ -6,6 +6,7 @@ via search result probing or DataForSEO API.
 """
 
 import logging
+import math
 import re
 import signal
 import time
@@ -22,6 +23,187 @@ from kdp_scout.rate_limiter import registry as rate_registry
 from kdp_scout.config import Config
 
 logger = logging.getLogger(__name__)
+
+# ── Scoring weights and normalizers ──────────────────────────────────
+
+DEFAULT_WEIGHTS = {
+    'autocomplete': 0.20,
+    'competition': 0.15,
+    'bsr_demand': 0.10,
+    'ads_impressions': 0.10,
+    'ads_orders': 0.15,
+    'ads_profitability': 0.10,
+    'search_volume': 0.05,
+    'commercial_value': 0.05,
+    'click_through_rate': 0.05,
+    'own_ranking': 0.05,
+}
+
+
+def normalize_autocomplete(position):
+    """Normalize autocomplete position to 0-1.
+
+    Position 1 = 1.0, position 10 = 0.1, position 11+ = 0.0.
+
+    Args:
+        position: 1-based autocomplete position, or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if position is None or position <= 0:
+        return 0.0
+    return max(0.0, (11 - position) / 10)
+
+
+def normalize_competition(count):
+    """Normalize competition count to 0-1 (low competition = high score).
+
+    Uses inverse formula: 1 / (1 + count / 50000).
+
+    Args:
+        count: Number of competing results, or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if count is None or count < 0:
+        return 0.0
+    return 1.0 / (1.0 + count / 50000.0)
+
+
+def normalize_bsr(bsr):
+    """Normalize BSR to 0-1 using log scale.
+
+    BSR 1 = 1.0, BSR 1M = 0.0.
+
+    Args:
+        bsr: Best Sellers Rank (average of top results), or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if bsr is None or bsr <= 0:
+        return 0.0
+    return max(0.0, 1.0 - math.log10(bsr) / 6.0)
+
+
+def normalize_impressions(impressions):
+    """Normalize impressions to 0-1 using log scale.
+
+    100K impressions = 1.0.
+
+    Args:
+        impressions: Number of ad impressions, or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if impressions is None or impressions <= 0:
+        return 0.0
+    return min(1.0, math.log10(max(1, impressions)) / 5.0)
+
+
+def normalize_orders(orders):
+    """Normalize orders to 0-1 using log scale.
+
+    1000 orders = 1.0.
+
+    Args:
+        orders: Number of orders, or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if orders is None or orders <= 0:
+        return 0.0
+    return min(1.0, math.log10(max(1, orders)) / 3.0)
+
+
+def normalize_ctr(clicks, impressions):
+    """Normalize click-through rate to 0-1.
+
+    5% CTR = 1.0. Computed as clicks / impressions.
+
+    Args:
+        clicks: Number of clicks, or None.
+        impressions: Number of impressions, or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if (clicks is None or impressions is None
+            or clicks < 0 or impressions <= 0):
+        return 0.0
+    ctr = clicks / impressions
+    return min(1.0, ctr / 0.05)
+
+
+def normalize_acos(acos):
+    """Normalize ACOS (profitability) to 0-1.
+
+    0% ACOS = 1.0, 100% ACOS = 0.0. ACOS is expected as a decimal
+    (e.g. 0.35 for 35%).
+
+    Args:
+        acos: Advertising cost of sales as decimal, or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if acos is None:
+        return 0.0
+    # Convert from decimal to percentage for the formula
+    acos_pct = acos * 100.0
+    return max(0.0, 1.0 - acos_pct / 100.0)
+
+
+def normalize_search_volume(volume):
+    """Normalize search volume to 0-1 using log scale.
+
+    100K volume = 1.0.
+
+    Args:
+        volume: Estimated search volume, or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if volume is None or volume <= 0:
+        return 0.0
+    return min(1.0, math.log10(max(1, volume)) / 5.0)
+
+
+def normalize_suggested_bid(bid):
+    """Normalize suggested bid to 0-1.
+
+    $3+ bid = 1.0 (higher bid = more commercial value).
+
+    Args:
+        bid: Suggested CPC bid in dollars, or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if bid is None or bid <= 0:
+        return 0.0
+    return min(1.0, bid / 3.0)
+
+
+def normalize_own_ranking(rank):
+    """Normalize own book ranking to 0-1.
+
+    Rank 1 = 1.0, rank 50 = ~0.0. If no rank, returns 0.
+
+    Args:
+        rank: 1-based rank position, or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if rank is None or rank <= 0:
+        return 0.0
+    return max(0.0, (50.0 - rank) / 49.0)
 
 
 def mine_keywords(seed, depth=1, department='kindle', progress_callback=None):
@@ -107,14 +289,20 @@ def mine_keywords(seed, depth=1, department='kindle', progress_callback=None):
 class KeywordScorer:
     """Scores keywords based on multiple signals.
 
-    Scoring combines autocomplete presence, competition level,
-    BSR data, and real ads performance data into a composite score.
+    Uses weighted normalized scoring across 10 signal dimensions.
+    Each signal is normalized to 0-1, multiplied by its weight,
+    and the final score is scaled to 0-100.
     """
 
-    def __init__(self):
-        """Initialize with database access."""
+    def __init__(self, weights=None):
+        """Initialize with database access.
+
+        Args:
+            weights: Optional dict overriding DEFAULT_WEIGHTS.
+        """
         init_db()
         self._repo = KeywordRepository()
+        self._weights = weights or DEFAULT_WEIGHTS
 
     def close(self):
         """Close database connection."""
@@ -123,63 +311,193 @@ class KeywordScorer:
     def score_keyword(self, keyword_id: int) -> float:
         """Compute composite score for a keyword combining all available signals.
 
-        Score components:
-        - Autocomplete presence: up to 100 points (pos 1 = 100, pos 10 = 10)
-        - Low competition: up to 30 points
-        - High demand (BSR): up to 25 points
-        - Real ads impressions: up to 20 points
-        - Real ads orders: up to 30 points
+        Returns a score on a 0-100 scale using weighted normalized signals.
 
         Args:
             keyword_id: Database ID of the keyword.
 
         Returns:
-            Composite score (0-205 theoretical max).
+            Composite score (0-100).
+        """
+        return self.score_keyword_detailed(keyword_id)['total']
+
+    def score_keyword_detailed(self, keyword_id: int) -> dict:
+        """Compute detailed score breakdown for a keyword.
+
+        Returns a dict with total score and per-component breakdown
+        showing raw values, normalized scores, weights, and weighted
+        contributions.
+
+        Args:
+            keyword_id: Database ID of the keyword.
+
+        Returns:
+            Dict with 'total' (float 0-100) and 'components' (dict of
+            component breakdowns).
         """
         kw = self._repo.get_keyword_with_metrics(keyword_id)
         if kw is None:
-            return 0.0
+            return self._empty_result()
 
-        score = 0.0
-
-        # Autocomplete presence (searched frequently)
-        autocomplete_position = kw['autocomplete_position']
-        if autocomplete_position is not None and autocomplete_position > 0:
-            score += max(0, 11 - autocomplete_position) * 10  # pos 1=100, pos 10=10
-
-        # Low competition (easier to rank)
+        # Gather raw values from metrics
+        autocomplete_pos = kw['autocomplete_position']
         competition_count = kw['competition_count']
-        if competition_count is not None:
-            if competition_count < 50000:
-                score += 30
-            elif competition_count < 200000:
-                score += 15
-
-        # Top results have good BSR (high demand)
         avg_bsr = kw['avg_bsr_top_results']
-        if avg_bsr is not None:
-            if avg_bsr < 100000:
-                score += 25
-            elif avg_bsr < 500000:
-                score += 10
-
-        # Real ads data (highest quality signal)
         impressions = kw['impressions']
-        if impressions is not None and impressions > 100:
-            score += 20
-        elif impressions is not None and impressions > 0:
-            score += 5
-
+        clicks = kw['clicks']
         orders = kw['orders']
-        if orders is not None and orders > 0:
-            score += 30
-            # Bonus for multiple orders
-            if orders >= 5:
-                score += 10
-            if orders >= 10:
-                score += 10
+        estimated_volume = kw['estimated_volume']
+        suggested_bid = kw['suggested_bid']
 
-        return score
+        # Fall back to ads_search_terms if keyword_metrics lacks ads data
+        if not impressions and not clicks and not orders:
+            ads_data = self._repo.get_ads_data_for_keyword(kw['keyword'])
+            if ads_data:
+                impressions = ads_data['impressions']
+                clicks = ads_data['clicks']
+                orders = ads_data['orders']
+
+        # Cross-reference: ACOS from ads_search_terms
+        acos = self._repo.get_ads_acos_for_keyword(kw['keyword'])
+
+        # Cross-reference: own book ranking
+        own_rank = self._repo.get_own_ranking_for_keyword(keyword_id)
+
+        # Normalize each signal
+        components = {}
+
+        # Autocomplete
+        norm = normalize_autocomplete(autocomplete_pos)
+        components['autocomplete'] = {
+            'score': norm,
+            'weight': self._weights['autocomplete'],
+            'weighted': norm * self._weights['autocomplete'] * 100,
+            'raw': autocomplete_pos,
+            'description': (f'Position {autocomplete_pos}'
+                           if autocomplete_pos else 'Not in autocomplete'),
+        }
+
+        # Competition
+        norm = normalize_competition(competition_count)
+        components['competition'] = {
+            'score': norm,
+            'weight': self._weights['competition'],
+            'weighted': norm * self._weights['competition'] * 100,
+            'raw': competition_count,
+            'description': (f'{competition_count:,} results'
+                           if competition_count is not None else 'No data'),
+        }
+
+        # BSR demand
+        norm = normalize_bsr(avg_bsr)
+        components['bsr_demand'] = {
+            'score': norm,
+            'weight': self._weights['bsr_demand'],
+            'weighted': norm * self._weights['bsr_demand'] * 100,
+            'raw': avg_bsr,
+            'description': (f'Avg BSR {avg_bsr:,.0f}'
+                           if avg_bsr is not None else 'No data'),
+        }
+
+        # Ads impressions
+        norm = normalize_impressions(impressions)
+        components['ads_impressions'] = {
+            'score': norm,
+            'weight': self._weights['ads_impressions'],
+            'weighted': norm * self._weights['ads_impressions'] * 100,
+            'raw': impressions,
+            'description': (f'{impressions:,} impressions'
+                           if impressions is not None else 'No data'),
+        }
+
+        # Ads orders
+        norm = normalize_orders(orders)
+        components['ads_orders'] = {
+            'score': norm,
+            'weight': self._weights['ads_orders'],
+            'weighted': norm * self._weights['ads_orders'] * 100,
+            'raw': orders,
+            'description': (f'{orders:,} orders'
+                           if orders is not None else 'No data'),
+        }
+
+        # Ads profitability (ACOS)
+        norm = normalize_acos(acos)
+        components['ads_profitability'] = {
+            'score': norm,
+            'weight': self._weights['ads_profitability'],
+            'weighted': norm * self._weights['ads_profitability'] * 100,
+            'raw': acos,
+            'description': (f'{acos * 100:.1f}% ACOS'
+                           if acos is not None else 'No data'),
+        }
+
+        # Search volume
+        norm = normalize_search_volume(estimated_volume)
+        components['search_volume'] = {
+            'score': norm,
+            'weight': self._weights['search_volume'],
+            'weighted': norm * self._weights['search_volume'] * 100,
+            'raw': estimated_volume,
+            'description': (f'{estimated_volume:,} est. volume'
+                           if estimated_volume is not None else 'No data'),
+        }
+
+        # Commercial value (suggested bid)
+        norm = normalize_suggested_bid(suggested_bid)
+        components['commercial_value'] = {
+            'score': norm,
+            'weight': self._weights['commercial_value'],
+            'weighted': norm * self._weights['commercial_value'] * 100,
+            'raw': suggested_bid,
+            'description': (f'${suggested_bid:.2f} suggested bid'
+                           if suggested_bid is not None else 'No data'),
+        }
+
+        # Click-through rate
+        norm = normalize_ctr(clicks, impressions)
+        components['click_through_rate'] = {
+            'score': norm,
+            'weight': self._weights['click_through_rate'],
+            'weighted': norm * self._weights['click_through_rate'] * 100,
+            'raw': (clicks / impressions if clicks and impressions
+                    and impressions > 0 else None),
+            'description': (f'{clicks / impressions * 100:.2f}% CTR'
+                           if clicks and impressions and impressions > 0
+                           else 'No data'),
+        }
+
+        # Own ranking
+        norm = normalize_own_ranking(own_rank)
+        components['own_ranking'] = {
+            'score': norm,
+            'weight': self._weights['own_ranking'],
+            'weighted': norm * self._weights['own_ranking'] * 100,
+            'raw': own_rank,
+            'description': (f'Rank #{own_rank}'
+                           if own_rank is not None else 'Not ranked'),
+        }
+
+        # Total = sum of weighted components
+        total = sum(c['weighted'] for c in components.values())
+
+        return {
+            'total': round(total, 1),
+            'components': components,
+        }
+
+    def _empty_result(self):
+        """Return an empty score result for missing keywords."""
+        components = {}
+        for name, weight in self._weights.items():
+            components[name] = {
+                'score': 0.0,
+                'weight': weight,
+                'weighted': 0.0,
+                'raw': None,
+                'description': 'No data',
+            }
+        return {'total': 0.0, 'components': components}
 
     def score_all_keywords(self, recalculate=False) -> int:
         """Score active keywords in the database.

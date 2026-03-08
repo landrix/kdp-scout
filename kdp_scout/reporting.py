@@ -109,15 +109,15 @@ class ReportingEngine:
                       if kw['orders'] else '-')
             score = f"{kw['score']:.0f}" if kw['score'] else '0'
 
-            # Color-code score
+            # Color-code score (0-100 scale)
             score_val = kw['score'] or 0
-            if score_val >= 100:
+            if score_val >= 75:
                 score_str = f'[bold green]{score}[/bold green]'
-            elif score_val >= 75:
-                score_str = f'[green]{score}[/green]'
             elif score_val >= 50:
-                score_str = f'[yellow]{score}[/yellow]'
+                score_str = f'[green]{score}[/green]'
             elif score_val >= 25:
+                score_str = f'[yellow]{score}[/yellow]'
+            elif score_val >= 10:
                 score_str = f'[dim]{score}[/dim]'
             else:
                 score_str = score
