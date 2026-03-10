@@ -17,11 +17,15 @@ logger = logging.getLogger(__name__)
 class CompetitorEngine:
     """Manages book tracking, snapshots, and competitor comparisons."""
 
-    def __init__(self):
-        """Initialize the engine with database and scraper."""
+    def __init__(self, marketplace=None):
+        """Initialize the engine with database and scraper.
+
+        Args:
+            marketplace: Two-letter country code ('us', 'de', etc.).
+        """
         init_db()
         self._repo = BookRepository()
-        self._scraper = ProductScraper()
+        self._scraper = ProductScraper(marketplace=marketplace)
 
     def close(self):
         """Close database connection."""
