@@ -7,6 +7,7 @@ Serves as the main entry point for the `track` CLI command group.
 import json
 import logging
 
+from kdp_scout.config import get_marketplace
 from kdp_scout.db import BookRepository, init_db
 from kdp_scout.collectors.product_scraper import ProductScraper, CaptchaDetected
 from kdp_scout.collectors.bsr_model import estimate_daily_sales, estimate_monthly_revenue
@@ -25,6 +26,7 @@ class CompetitorEngine:
         """
         init_db()
         self._repo = BookRepository()
+        self._marketplace = get_marketplace(marketplace)
         self._scraper = ProductScraper(marketplace=marketplace)
 
     def close(self):
@@ -231,11 +233,12 @@ class CompetitorEngine:
         daily_sales = None
         monthly_revenue = None
         if bsr:
-            daily_sales = estimate_daily_sales(bsr, 'us_kindle')
+            bsr_model = self._marketplace['bsr_model']
+            daily_sales = estimate_daily_sales(bsr, bsr_model)
             price_for_revenue = price_kindle or price_paperback
             if price_for_revenue:
                 monthly_revenue = estimate_monthly_revenue(
-                    bsr, price_for_revenue, 'us_kindle'
+                    bsr, price_for_revenue, bsr_model
                 )
 
         # Serialize category BSR as JSON

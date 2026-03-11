@@ -79,7 +79,13 @@ def mine(seed, depth, department, marketplace):
     from kdp_scout.keyword_engine import mine_keywords
     from kdp_scout.config import get_marketplace
 
-    mp = get_marketplace(marketplace)
+    try:
+        mp = get_marketplace(marketplace)
+    except ValueError as exc:
+        raise click.BadParameter(
+            str(exc),
+            param_hint="'--marketplace'",
+        )
     mp_label = marketplace or Config.MARKETPLACE
 
     console.print(
@@ -1354,7 +1360,13 @@ def trending(source, list_type, limit, save, marketplace):
     from kdp_scout.db import KeywordRepository, init_db
     from kdp_scout.config import get_marketplace
 
-    mp = get_marketplace(marketplace)
+    try:
+        mp = get_marketplace(marketplace)
+    except ValueError as exc:
+        raise click.BadParameter(
+            str(exc),
+            param_hint="'--marketplace'",
+        )
     mp_label = marketplace or Config.MARKETPLACE
 
     console.print(

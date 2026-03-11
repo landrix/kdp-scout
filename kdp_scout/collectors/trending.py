@@ -118,10 +118,22 @@ def scrape_bestseller_keywords(list_type='kindle', marketplace=None,
 
     mp = get_marketplace(marketplace)
     mp_urls = mp.get('bestsellers', BESTSELLER_URLS)
+    mp_identifier = mp.get('domain') or marketplace or 'unknown'
     url = mp_urls.get(list_type)
     if not url:
-        logger.error(f'Unknown bestseller list type: {list_type}')
-        return []
+        fallback_url = BESTSELLER_URLS.get(list_type)
+        if fallback_url:
+            logger.warning(
+                f'Bestseller list type "{list_type}" not configured for marketplace '
+                f'"{mp_identifier}"; falling back to default URL.'
+            )
+            url = fallback_url
+        else:
+            logger.error(
+                f'Unknown bestseller list type "{list_type}" for marketplace '
+                f'"{mp_identifier}"'
+            )
+            return []
 
     rate_registry.acquire('product_scrape')
 
