@@ -60,12 +60,16 @@ kdp-scout config init
 
 > **Note:** You need to activate the virtual environment (`source .venv/bin/activate`) each time you open a new terminal before running `kdp-scout` commands.
 
-Copy the example environment file and configure:
+That's it — you're ready to go. Run `kdp-scout trending` to verify it works.
+
+**Optional:** If you want to customize rate limits or add a DataForSEO API key for search volume data, copy the example config:
 
 ```bash
 cp .env.example .env
-# Edit .env with your settings (all optional for free tier)
+# Edit .env with your settings (all optional — the tool works fine without it)
 ```
+
+> **Can't see .env.example?** Dotfiles are hidden by default. Run `ls -a` to see them, or just skip this step — it's not required.
 
 ## Quick Start
 
