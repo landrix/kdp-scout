@@ -17,7 +17,7 @@ from rich.panel import Panel
 
 from kdp_scout.db import (
     KeywordRepository, BookRepository, AdsRepository,
-    KeywordRankingRepository, init_db,
+    KeywordRankingRepository, SemanticClusterRepository, init_db,
 )
 
 logger = logging.getLogger(__name__)
@@ -777,6 +777,153 @@ class ReportingEngine:
         console.print(
             f'[bold]Total score packed:[/bold] {total_score:.0f}'
         )
+
+    # ── Export: Semantic KDP Backend Keywords ──────────────────────
+
+    def export_semantic_keywords(self, book_title=None, book_genre=None):
+        """Generate A10-optimized semantic keyword slots for KDP backend.
+
+        Uses Claude API to cluster keywords semantically and generate
+        natural language search phrases, then packs them into 7 KDP
+        backend slots (50 bytes each).
+
+        Also shows the original word-packed version for comparison.
+
+        Args:
+            book_title: Optional book title for context.
+            book_genre: Optional book genre for context.
+        """
+        from kdp_scout.keyword_engine import generate_semantic_phrases
+
+        keywords = self._kw_repo.get_keywords_with_latest_metrics(
+            limit=200, min_score=0, order_by='score',
+        )
+
+        if not keywords:
+            console.print(
+                '[yellow]No keywords in database. '
+                'Run "kdp-scout mine" and "kdp-scout score" first.[/yellow]'
+            )
+            return
+
+        keyword_texts = [kw['keyword'] for kw in keywords]
+
+        book_context = None
+        if book_title or book_genre:
+            book_context = {}
+            if book_title:
+                book_context['title'] = book_title
+            if book_genre:
+                book_context['genre'] = book_genre
+
+        console.print(
+            Panel(
+                '[bold]A10 Semantic Keyword Optimization[/bold]\n'
+                'Generating natural search phrases from your keywords...',
+                title='[bold cyan]Semantic KDP Keywords[/bold cyan]',
+                border_style='cyan',
+            )
+        )
+        console.print()
+
+        # Generate semantic phrases via Claude
+        phrases = generate_semantic_phrases(keyword_texts, book_context)
+
+        if not phrases:
+            console.print(
+                '[yellow]Could not generate semantic phrases. '
+                'Check that ANTHROPIC_API_KEY is set in your .env file.[/yellow]'
+            )
+            return
+
+        # Pack phrases into 7 slots (50 bytes each), preserving whole phrases
+        slots = ['' for _ in range(KDP_SLOT_COUNT)]
+        slot_bytes = [0] * KDP_SLOT_COUNT
+        used_phrases = []
+
+        for phrase_data in phrases:
+            phrase = phrase_data['phrase'].strip()
+            phrase_byte_len = len(phrase.encode('utf-8'))
+
+            if phrase_byte_len > KDP_SLOT_MAX_BYTES:
+                # Skip phrases that are too long for a single slot
+                continue
+
+            placed = False
+            for slot_idx in range(KDP_SLOT_COUNT):
+                current = slot_bytes[slot_idx]
+                separator = 1 if slots[slot_idx] else 0
+                needed = phrase_byte_len + separator
+
+                if current + needed <= KDP_SLOT_MAX_BYTES:
+                    if slots[slot_idx]:
+                        slots[slot_idx] += ' ' + phrase
+                    else:
+                        slots[slot_idx] = phrase
+                    slot_bytes[slot_idx] += needed
+                    used_phrases.append(phrase_data)
+                    placed = True
+                    break
+
+        # Display semantic version
+        console.print('[bold green]SEMANTIC (A10-Optimized) Slots:[/bold green]')
+        console.print()
+
+        for i, slot in enumerate(slots, 1):
+            byte_count = len(slot.encode('utf-8')) if slot else 0
+
+            if slot:
+                bar_len = int(byte_count / KDP_SLOT_MAX_BYTES * 20)
+                bar = '#' * bar_len + '-' * (20 - bar_len)
+
+                if byte_count > 45:
+                    byte_color = 'yellow'
+                else:
+                    byte_color = 'green'
+
+                console.print(
+                    f'[bold]Slot {i}:[/bold] [{byte_color}]'
+                    f'{byte_count}/{KDP_SLOT_MAX_BYTES} bytes[/{byte_color}] '
+                    f'[dim][{bar}][/dim]'
+                )
+                console.print(f'  {slot}')
+            else:
+                console.print(f'[bold]Slot {i}:[/bold] [dim](empty)[/dim]')
+            console.print()
+
+        # Show cluster breakdown
+        console.print('[bold]Phrase Details:[/bold]')
+        detail_table = Table(show_lines=False, expand=True)
+        detail_table.add_column('#', style='dim', width=3, justify='right')
+        detail_table.add_column('Phrase', style='bold', ratio=3)
+        detail_table.add_column('Relevance', justify='center', width=10)
+        detail_table.add_column('Cluster', ratio=2)
+
+        for i, p in enumerate(used_phrases, 1):
+            rel = p['relevance']
+            if rel >= 0.8:
+                rel_str = f'[green]{rel:.0%}[/green]'
+            elif rel >= 0.6:
+                rel_str = f'[yellow]{rel:.0%}[/yellow]'
+            else:
+                rel_str = f'[dim]{rel:.0%}[/dim]'
+
+            detail_table.add_row(
+                str(i),
+                p['phrase'],
+                rel_str,
+                p.get('cluster_label', '-'),
+            )
+
+        console.print(detail_table)
+        console.print()
+
+        # Now show original word-packed version for comparison
+        console.print(
+            '[bold yellow]COMPARISON - Original word-packed slots:[/bold yellow]'
+        )
+        console.print()
+        self.export_backend_keywords()
 
 
 # ── Utility functions ─────────────────────────────────────────────

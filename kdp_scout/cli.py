@@ -903,22 +903,211 @@ def export_ads(min_score, output_format):
 
 
 @export.command('backend')
-def export_backend():
+@click.option('--semantic', is_flag=True, default=False,
+              help='Use A10 semantic phrase optimization instead of word packing.')
+@click.option('--title', default=None,
+              help='Book title for context (used with --semantic).')
+@click.option('--genre', default=None,
+              help='Book genre for context (used with --semantic).')
+def export_backend(semantic, title, genre):
     """Generate optimized KDP backend keyword slots.
 
     Packs the highest-scoring keywords into 7 slots of 50 bytes each,
     ready to copy-paste into the KDP dashboard.
 
-    Example:
+    Use --semantic to generate A10-optimized natural language phrases
+    instead of individual word packing.
+
+    Examples:
         kdp-scout export backend
+        kdp-scout export backend --semantic
+        kdp-scout export backend --semantic --title "The First Key" --genre "historical thriller"
     """
     from kdp_scout.reporting import ReportingEngine
 
     engine = ReportingEngine()
     try:
-        engine.export_backend_keywords()
+        if semantic:
+            engine.export_semantic_keywords(
+                book_title=title, book_genre=genre,
+            )
+        else:
+            engine.export_backend_keywords()
     finally:
         engine.close()
+
+
+@main.command('semantic')
+@click.option('--title', default=None,
+              help='Book title for context-aware phrase generation.')
+@click.option('--genre', default=None,
+              help='Book genre for context (e.g., "historical thriller").')
+@click.option('--no-cache', is_flag=True, default=False,
+              help='Skip cached results and regenerate.')
+def semantic_cmd(title, genre, no_cache):
+    """Generate A10-optimized semantic keyword phrases for KDP.
+
+    Analyzes your keyword database, clusters keywords semantically,
+    and generates natural search phrases optimized for Amazon's A10
+    algorithm. Results are formatted for KDP backend keyword slots.
+
+    Examples:
+        kdp-scout semantic --title "The First Key" --genre "historical thriller"
+        kdp-scout semantic --genre "romance"
+        kdp-scout semantic --no-cache
+    """
+    from kdp_scout.collectors.semantic import SemanticCollector
+    from kdp_scout.db import KeywordRepository
+    from kdp_scout.reporting import (
+        ReportingEngine, KDP_SLOT_COUNT, KDP_SLOT_MAX_BYTES,
+    )
+
+    init_db()
+    kw_repo = KeywordRepository()
+
+    try:
+        keywords = kw_repo.get_keywords_with_latest_metrics(
+            limit=100, min_score=0, order_by='score',
+        )
+
+        if not keywords:
+            console.print(
+                '[yellow]No keywords in database. '
+                'Run "kdp-scout mine" and "kdp-scout score" first.[/yellow]'
+            )
+            return
+
+        keyword_texts = [kw['keyword'] for kw in keywords]
+
+        collector = SemanticCollector()
+        try:
+            if not collector.is_available():
+                console.print(
+                    '[red]ANTHROPIC_API_KEY not set. '
+                    'Add it to your .env file to use semantic analysis.[/red]'
+                )
+                return
+
+            console.print(
+                Panel(
+                    f'[bold]Keywords:[/bold] {len(keyword_texts)} from database\n'
+                    + (f'[bold]Title:[/bold] {title}\n' if title else '')
+                    + (f'[bold]Genre:[/bold] {genre}\n' if genre else '')
+                    + '[bold]Engine:[/bold] Claude API (A10 semantic clustering)',
+                    title='[bold cyan]Semantic Keyword Analysis[/bold cyan]',
+                    border_style='cyan',
+                )
+            )
+
+            with console.status('[bold green]Analyzing keywords with Claude...'):
+                clusters = collector.collect(
+                    query=None,
+                    keywords=keyword_texts,
+                    book_title=title,
+                    book_genre=genre,
+                    use_cache=not no_cache,
+                )
+
+            if not clusters:
+                console.print(
+                    '[yellow]No clusters generated. '
+                    'Check API key and try again.[/yellow]'
+                )
+                return
+
+            # Display clusters
+            console.print()
+            for i, cluster in enumerate(clusters, 1):
+                rel = cluster['relevance_score']
+                if rel >= 0.8:
+                    rel_str = f'[green]{rel:.0%}[/green]'
+                elif rel >= 0.6:
+                    rel_str = f'[yellow]{rel:.0%}[/yellow]'
+                else:
+                    rel_str = f'[dim]{rel:.0%}[/dim]'
+
+                console.print(
+                    f'[bold]Cluster {i}: {cluster["label"]}[/bold] '
+                    f'(relevance: {rel_str})'
+                )
+                kws = ', '.join(cluster['keywords'][:8])
+                console.print(f'  [dim]Keywords: {kws}[/dim]')
+                for phrase in cluster['phrases']:
+                    byte_count = len(phrase.encode('utf-8'))
+                    ok = '[green]OK[/green]' if byte_count <= 50 else '[red]OVER[/red]'
+                    console.print(
+                        f'    -> {phrase} [{byte_count}b {ok}]'
+                    )
+                console.print()
+
+            # Pack into KDP slots
+            all_phrases = []
+            for cluster in clusters:
+                rel = cluster['relevance_score']
+                for phrase in cluster['phrases']:
+                    all_phrases.append({
+                        'phrase': phrase,
+                        'relevance': rel,
+                    })
+
+            # Sort by relevance
+            all_phrases.sort(key=lambda x: x['relevance'], reverse=True)
+
+            console.print(
+                Panel(
+                    'Copy these into your KDP dashboard backend keywords.',
+                    title='[bold cyan]KDP Backend Slots (A10 Semantic)[/bold cyan]',
+                    border_style='cyan',
+                )
+            )
+            console.print()
+
+            slots = ['' for _ in range(KDP_SLOT_COUNT)]
+            slot_bytes = [0] * KDP_SLOT_COUNT
+
+            for p in all_phrases:
+                phrase = p['phrase'].strip()
+                phrase_byte_len = len(phrase.encode('utf-8'))
+
+                if phrase_byte_len > KDP_SLOT_MAX_BYTES:
+                    continue
+
+                for slot_idx in range(KDP_SLOT_COUNT):
+                    current = slot_bytes[slot_idx]
+                    separator = 1 if slots[slot_idx] else 0
+                    needed = phrase_byte_len + separator
+
+                    if current + needed <= KDP_SLOT_MAX_BYTES:
+                        if slots[slot_idx]:
+                            slots[slot_idx] += ' ' + phrase
+                        else:
+                            slots[slot_idx] = phrase
+                        slot_bytes[slot_idx] += needed
+                        break
+
+            for i, slot in enumerate(slots, 1):
+                byte_count = len(slot.encode('utf-8')) if slot else 0
+                if slot:
+                    bar_len = int(byte_count / KDP_SLOT_MAX_BYTES * 20)
+                    bar = '#' * bar_len + '-' * (20 - bar_len)
+                    byte_color = 'yellow' if byte_count > 45 else 'green'
+                    console.print(
+                        f'[bold]Slot {i}:[/bold] [{byte_color}]'
+                        f'{byte_count}/{KDP_SLOT_MAX_BYTES} bytes'
+                        f'[/{byte_color}] [dim][{bar}][/dim]'
+                    )
+                    console.print(f'  {slot}')
+                else:
+                    console.print(
+                        f'[bold]Slot {i}:[/bold] [dim](empty)[/dim]'
+                    )
+                console.print()
+
+        finally:
+            collector.close()
+
+    finally:
+        kw_repo.close()
 
 
 # -- Reverse ASIN command --------------------------------------------------

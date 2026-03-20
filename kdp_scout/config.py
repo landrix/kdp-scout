@@ -23,6 +23,7 @@ class Config:
     # API Keys
     DATAFORSEO_LOGIN = os.getenv('DATAFORSEO_LOGIN', '')
     DATAFORSEO_API_KEY = os.getenv('DATAFORSEO_API_KEY', '')
+    ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
 
     # Proxy
     PROXY_URL = os.getenv('PROXY_URL', '')
@@ -79,6 +80,7 @@ class Config:
             'DB_PATH': cls.get_db_path(),
             'DATAFORSEO_LOGIN': cls.DATAFORSEO_LOGIN or '(not set)',
             'DATAFORSEO_API_KEY': '***' if cls.DATAFORSEO_API_KEY else '(not set)',
+            'ANTHROPIC_API_KEY': '***' if cls.ANTHROPIC_API_KEY else '(not set)',
             'PROXY_URL': cls.PROXY_URL or '(not set)',
             'AUTOCOMPLETE_RATE_LIMIT': f'{cls.AUTOCOMPLETE_RATE_LIMIT}s',
             'PRODUCT_SCRAPE_RATE_LIMIT': f'{cls.PRODUCT_SCRAPE_RATE_LIMIT}s',

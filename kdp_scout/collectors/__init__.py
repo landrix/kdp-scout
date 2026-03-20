@@ -6,4 +6,5 @@ Each collector implements a specific data source:
 - ads_importer: Amazon Ads search term report import (Phase 3)
 - bsr_model: BSR-to-sales estimation model (Phase 2)
 - dataforseo: DataForSEO API integration for reverse ASIN & keyword data (Phase 4)
+- semantic: Claude API semantic keyword clustering for A10 optimization
 """

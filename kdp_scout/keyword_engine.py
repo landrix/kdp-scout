@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 # ── Scoring weights and normalizers ──────────────────────────────────
 
 DEFAULT_WEIGHTS = {
-    'autocomplete': 0.20,
-    'competition': 0.15,
+    'autocomplete': 0.15,
+    'competition': 0.10,
     'bsr_demand': 0.10,
     'ads_impressions': 0.10,
     'ads_orders': 0.15,
@@ -37,6 +37,7 @@ DEFAULT_WEIGHTS = {
     'commercial_value': 0.05,
     'click_through_rate': 0.05,
     'own_ranking': 0.05,
+    'semantic_relevance': 0.10,
 }
 
 
@@ -204,6 +205,147 @@ def normalize_own_ranking(rank):
     if rank is None or rank <= 0:
         return 0.0
     return max(0.0, (50.0 - rank) / 49.0)
+
+
+def normalize_semantic_relevance(score):
+    """Normalize semantic relevance score to 0-1.
+
+    Input score is expected to be on a 0-1 scale already
+    (as returned by the semantic clustering analysis).
+    Clamps to [0, 1] for safety.
+
+    Args:
+        score: Semantic relevance score (0-1), or None.
+
+    Returns:
+        Float in [0, 1].
+    """
+    if score is None or score < 0:
+        return 0.0
+    return min(1.0, float(score))
+
+
+def generate_semantic_phrases(keywords, book_context=None):
+    """Generate semantic search phrases from keywords using Claude API.
+
+    Groups keywords by semantic clusters and generates natural language
+    search phrases that combine related keywords, optimized for
+    Amazon's A10 algorithm.
+
+    Args:
+        keywords: List of keyword strings (top-scoring from database).
+        book_context: Optional dict with 'title' and 'genre' keys
+            for context-aware phrase generation.
+
+    Returns:
+        List of dicts: [{'phrase': str, 'relevance': float,
+                         'source_keywords': list}]
+        Returns empty list if Claude API is unavailable.
+    """
+    if not keywords:
+        return []
+
+    api_key = Config.ANTHROPIC_API_KEY
+    if not api_key:
+        logger.warning(
+            'ANTHROPIC_API_KEY not set. Semantic phrase generation unavailable.'
+        )
+        return []
+
+    try:
+        import anthropic
+    except ImportError:
+        logger.warning('anthropic package not installed.')
+        return []
+
+    context_str = ''
+    if book_context:
+        parts = []
+        if book_context.get('title'):
+            parts.append(f"Book title: {book_context['title']}")
+        if book_context.get('genre'):
+            parts.append(f"Genre: {book_context['genre']}")
+        context_str = '\n'.join(parts) + '\n\n'
+
+    keyword_list = '\n'.join(f'- {kw}' for kw in keywords[:60])
+
+    prompt = f"""{context_str}Here are keywords from Amazon KDP research:
+
+{keyword_list}
+
+Group these keywords into semantic clusters of related terms, then for each cluster generate 2-3 natural language search phrases that a reader might actually type into Amazon. Each phrase should:
+1. Combine multiple related keywords naturally
+2. Be under 50 bytes (roughly 50 characters)
+3. Sound like a real reader search query
+4. NEVER include any book titles or author names
+
+Return your response as JSON with this exact structure:
+{{
+  "clusters": [
+    {{
+      "label": "cluster theme name",
+      "keywords": ["keyword1", "keyword2"],
+      "phrases": [
+        {{"phrase": "natural search phrase", "relevance": 0.85}}
+      ]
+    }}
+  ]
+}}
+
+Return ONLY the JSON, no other text."""
+
+    try:
+        client = anthropic.Anthropic(api_key=api_key)
+        response = client.messages.create(
+            model='claude-sonnet-4-20250514',
+            max_tokens=2000,
+            messages=[{'role': 'user', 'content': prompt}],
+        )
+
+        import json
+        content = response.content[0].text.strip()
+        # Handle possible markdown code blocks
+        if content.startswith('```'):
+            content = content.split('\n', 1)[1]
+            if content.endswith('```'):
+                content = content[:-3]
+            content = content.strip()
+
+        data = json.loads(content)
+        results = []
+
+        for cluster in data.get('clusters', []):
+            source_keywords = cluster.get('keywords', [])
+            for phrase_data in cluster.get('phrases', []):
+                phrase = phrase_data.get('phrase', '')
+                relevance = float(phrase_data.get('relevance', 0.5))
+                if phrase:
+                    results.append({
+                        'phrase': phrase,
+                        'relevance': relevance,
+                        'source_keywords': source_keywords,
+                        'cluster_label': cluster.get('label', ''),
+                    })
+
+        # Sort by relevance descending
+        results.sort(key=lambda x: x['relevance'], reverse=True)
+        return results
+
+    except anthropic.AuthenticationError:
+        logger.error('Invalid ANTHROPIC_API_KEY. Check your .env file.')
+        return []
+    except anthropic.RateLimitError:
+        logger.error('Anthropic API rate limit exceeded. Try again later.')
+        return []
+    except anthropic.APIConnectionError:
+        logger.error('Could not connect to Anthropic API.')
+        return []
+    except anthropic.APIError as e:
+        logger.error(f'Anthropic API error: {e}')
+        return []
+    except (json.JSONDecodeError, KeyError, IndexError) as e:
+        logger.error(f'Failed to parse Claude response: {e}')
+        return []
 
 
 def mine_keywords(seed, depth=1, department='kindle', progress_callback=None):
@@ -477,6 +619,18 @@ class KeywordScorer:
             'description': (f'Rank #{own_rank}'
                            if own_rank is not None else 'Not ranked'),
         }
+
+        # Semantic relevance (placeholder - scored at 0 unless
+        # semantic analysis has been run for this keyword)
+        semantic_weight = self._weights.get('semantic_relevance', 0)
+        if semantic_weight > 0:
+            components['semantic_relevance'] = {
+                'score': 0.0,
+                'weight': semantic_weight,
+                'weighted': 0.0,
+                'raw': None,
+                'description': 'Run semantic analysis to populate',
+            }
 
         # Total = sum of weighted components
         total = sum(c['weighted'] for c in components.values())
