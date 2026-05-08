@@ -937,22 +937,211 @@ def export_ads(min_score, output_format):
 
 
 @export.command('backend')
-def export_backend():
+@click.option('--semantic', is_flag=True, default=False,
+              help='Use A10 semantic phrase optimization instead of word packing.')
+@click.option('--title', default=None,
+              help='Book title for context (used with --semantic).')
+@click.option('--genre', default=None,
+              help='Book genre for context (used with --semantic).')
+def export_backend(semantic, title, genre):
     """Generate optimized KDP backend keyword slots.
 
     Packs the highest-scoring keywords into 7 slots of 50 bytes each,
     ready to copy-paste into the KDP dashboard.
 
-    Example:
+    Use --semantic to generate A10-optimized natural language phrases
+    instead of individual word packing.
+
+    Examples:
         kdp-scout export backend
+        kdp-scout export backend --semantic
+        kdp-scout export backend --semantic --title "The First Key" --genre "historical thriller"
     """
     from kdp_scout.reporting import ReportingEngine
 
     engine = ReportingEngine()
     try:
-        engine.export_backend_keywords()
+        if semantic:
+            engine.export_semantic_keywords(
+                book_title=title, book_genre=genre,
+            )
+        else:
+            engine.export_backend_keywords()
     finally:
         engine.close()
+
+
+@main.command('semantic')
+@click.option('--title', default=None,
+              help='Book title for context-aware phrase generation.')
+@click.option('--genre', default=None,
+              help='Book genre for context (e.g., "historical thriller").')
+@click.option('--no-cache', is_flag=True, default=False,
+              help='Skip cached results and regenerate.')
+def semantic_cmd(title, genre, no_cache):
+    """Generate A10-optimized semantic keyword phrases for KDP.
+
+    Analyzes your keyword database, clusters keywords semantically,
+    and generates natural search phrases optimized for Amazon's A10
+    algorithm. Results are formatted for KDP backend keyword slots.
+
+    Examples:
+        kdp-scout semantic --title "The First Key" --genre "historical thriller"
+        kdp-scout semantic --genre "romance"
+        kdp-scout semantic --no-cache
+    """
+    from kdp_scout.collectors.semantic import SemanticCollector
+    from kdp_scout.db import KeywordRepository
+    from kdp_scout.reporting import (
+        ReportingEngine, KDP_SLOT_COUNT, KDP_SLOT_MAX_BYTES,
+    )
+
+    init_db()
+    kw_repo = KeywordRepository()
+
+    try:
+        keywords = kw_repo.get_keywords_with_latest_metrics(
+            limit=100, min_score=0, order_by='score',
+        )
+
+        if not keywords:
+            console.print(
+                '[yellow]No keywords in database. '
+                'Run "kdp-scout mine" and "kdp-scout score" first.[/yellow]'
+            )
+            return
+
+        keyword_texts = [kw['keyword'] for kw in keywords]
+
+        collector = SemanticCollector()
+        try:
+            if not collector.is_available():
+                console.print(
+                    '[red]ANTHROPIC_API_KEY not set. '
+                    'Add it to your .env file to use semantic analysis.[/red]'
+                )
+                return
+
+            console.print(
+                Panel(
+                    f'[bold]Keywords:[/bold] {len(keyword_texts)} from database\n'
+                    + (f'[bold]Title:[/bold] {title}\n' if title else '')
+                    + (f'[bold]Genre:[/bold] {genre}\n' if genre else '')
+                    + '[bold]Engine:[/bold] Claude API (A10 semantic clustering)',
+                    title='[bold cyan]Semantic Keyword Analysis[/bold cyan]',
+                    border_style='cyan',
+                )
+            )
+
+            with console.status('[bold green]Analyzing keywords with Claude...'):
+                clusters = collector.collect(
+                    query=None,
+                    keywords=keyword_texts,
+                    book_title=title,
+                    book_genre=genre,
+                    use_cache=not no_cache,
+                )
+
+            if not clusters:
+                console.print(
+                    '[yellow]No clusters generated. '
+                    'Check API key and try again.[/yellow]'
+                )
+                return
+
+            # Display clusters
+            console.print()
+            for i, cluster in enumerate(clusters, 1):
+                rel = cluster['relevance_score']
+                if rel >= 0.8:
+                    rel_str = f'[green]{rel:.0%}[/green]'
+                elif rel >= 0.6:
+                    rel_str = f'[yellow]{rel:.0%}[/yellow]'
+                else:
+                    rel_str = f'[dim]{rel:.0%}[/dim]'
+
+                console.print(
+                    f'[bold]Cluster {i}: {cluster["label"]}[/bold] '
+                    f'(relevance: {rel_str})'
+                )
+                kws = ', '.join(cluster['keywords'][:8])
+                console.print(f'  [dim]Keywords: {kws}[/dim]')
+                for phrase in cluster['phrases']:
+                    byte_count = len(phrase.encode('utf-8'))
+                    ok = '[green]OK[/green]' if byte_count <= 50 else '[red]OVER[/red]'
+                    console.print(
+                        f'    -> {phrase} [{byte_count}b {ok}]'
+                    )
+                console.print()
+
+            # Pack into KDP slots
+            all_phrases = []
+            for cluster in clusters:
+                rel = cluster['relevance_score']
+                for phrase in cluster['phrases']:
+                    all_phrases.append({
+                        'phrase': phrase,
+                        'relevance': rel,
+                    })
+
+            # Sort by relevance
+            all_phrases.sort(key=lambda x: x['relevance'], reverse=True)
+
+            console.print(
+                Panel(
+                    'Copy these into your KDP dashboard backend keywords.',
+                    title='[bold cyan]KDP Backend Slots (A10 Semantic)[/bold cyan]',
+                    border_style='cyan',
+                )
+            )
+            console.print()
+
+            slots = ['' for _ in range(KDP_SLOT_COUNT)]
+            slot_bytes = [0] * KDP_SLOT_COUNT
+
+            for p in all_phrases:
+                phrase = p['phrase'].strip()
+                phrase_byte_len = len(phrase.encode('utf-8'))
+
+                if phrase_byte_len > KDP_SLOT_MAX_BYTES:
+                    continue
+
+                for slot_idx in range(KDP_SLOT_COUNT):
+                    current = slot_bytes[slot_idx]
+                    separator = 1 if slots[slot_idx] else 0
+                    needed = phrase_byte_len + separator
+
+                    if current + needed <= KDP_SLOT_MAX_BYTES:
+                        if slots[slot_idx]:
+                            slots[slot_idx] += ' ' + phrase
+                        else:
+                            slots[slot_idx] = phrase
+                        slot_bytes[slot_idx] += needed
+                        break
+
+            for i, slot in enumerate(slots, 1):
+                byte_count = len(slot.encode('utf-8')) if slot else 0
+                if slot:
+                    bar_len = int(byte_count / KDP_SLOT_MAX_BYTES * 20)
+                    bar = '#' * bar_len + '-' * (20 - bar_len)
+                    byte_color = 'yellow' if byte_count > 45 else 'green'
+                    console.print(
+                        f'[bold]Slot {i}:[/bold] [{byte_color}]'
+                        f'{byte_count}/{KDP_SLOT_MAX_BYTES} bytes'
+                        f'[/{byte_color}] [dim][{bar}][/dim]'
+                    )
+                    console.print(f'  {slot}')
+                else:
+                    console.print(
+                        f'[bold]Slot {i}:[/bold] [dim](empty)[/dim]'
+                    )
+                console.print()
+
+        finally:
+            collector.close()
+
+    finally:
+        kw_repo.close()
 
 
 # -- Reverse ASIN command --------------------------------------------------
@@ -1668,6 +1857,454 @@ def mine_categories(categories, depth, department, limit_categories, marketplace
         'then "kdp-scout report keywords" for the full ranked list.[/dim]'
     )
     console.print(f'[dim]Database: {Config.get_db_path()}[/dim]')
+
+
+# -- Niche Analysis & Keyword Validation ------------------------------------
+
+
+@main.command('validate-keywords')
+@click.option(
+    '--title', type=str, default=None,
+    help='Book title (to check for redundancy with backend keywords).',
+)
+@click.option(
+    '--subtitle', type=str, default=None,
+    help='Book subtitle (to check for redundancy).',
+)
+@click.option(
+    '--genre', type=str, default=None,
+    help='Genre for trope keyword suggestions (e.g., "thriller", "romance").',
+)
+@click.option(
+    '--optimize', is_flag=True, default=False,
+    help='Auto-optimize slots by removing redundancy and waste.',
+)
+def validate_keywords(title, subtitle, genre, optimize):
+    """Validate KDP backend keywords against Amazon's Rufus AI rules.
+
+    Checks byte counts (500-byte limit per slot), detects redundancy
+    with your title/subtitle, flags multi-byte characters, and suggests
+    trope keywords for semantic matching.
+
+    Run interactively — enter up to 7 keyword slots when prompted, or
+    pipe from your existing KDP export.
+
+    Examples:
+        kdp-scout validate-keywords --title "The First Key"
+        kdp-scout validate-keywords --genre "historical fiction"
+        kdp-scout validate-keywords --title "My Book" --optimize
+    """
+    from kdp_scout.keyword_validator import (
+        validate_backend_keywords, suggest_trope_keywords,
+        optimize_slot_content,
+    )
+
+    # Collect keyword slots from user
+    console.print(
+        Panel(
+            '[bold]Enter your KDP backend keywords[/bold]\n'
+            'Enter up to 7 keyword slots (one per line).\n'
+            'Press Enter on an empty line when done.',
+            title='[bold cyan]KDP Keyword Validator[/bold cyan]',
+            border_style='cyan',
+        )
+    )
+    console.print()
+
+    slots = []
+    for i in range(7):
+        try:
+            slot = input(f'  Slot {i + 1}: ').strip()
+        except (EOFError, KeyboardInterrupt):
+            break
+        if not slot:
+            break
+        slots.append(slot)
+
+    if not slots:
+        # Fall back to database keywords
+        from kdp_scout.reporting import ReportingEngine
+        console.print(
+            '[yellow]No slots entered. Using keywords from database...[/yellow]'
+        )
+        engine = ReportingEngine()
+        try:
+            engine.export_backend_keywords()
+        finally:
+            engine.close()
+        return
+
+    # Optimize if requested
+    if optimize and title:
+        console.print('\n[bold]Optimizing slots...[/bold]')
+        optimized = []
+        for slot in slots:
+            opt = optimize_slot_content(slot, title=title)
+            if opt != slot:
+                console.print(
+                    f'  [dim]{slot}[/dim]\n'
+                    f'  [green]→ {opt}[/green]'
+                )
+            optimized.append(opt)
+        slots = optimized
+        console.print()
+
+    # Validate
+    result = validate_backend_keywords(slots, title=title, subtitle=subtitle)
+
+    # Display results
+    console.print()
+    if result['valid']:
+        console.print('[bold green]✓ All slots are within byte limits[/bold green]')
+    else:
+        console.print('[bold red]✗ Some slots exceed byte limits![/bold red]')
+
+    console.print()
+
+    # Slot details table
+    table = Table(title='Slot Analysis', show_lines=True, expand=True)
+    table.add_column('Slot', justify='center', width=4)
+    table.add_column('Content', ratio=4, no_wrap=False)
+    table.add_column('Bytes', justify='right', width=12)
+    table.add_column('Words', justify='right', width=6)
+    table.add_column('Status', justify='center', width=8)
+
+    for slot_info in result['slots']:
+        byte_str = f"{slot_info['byte_count']}/{slot_info['byte_limit']}"
+        if not slot_info['is_valid']:
+            status = '[bold red]OVER[/bold red]'
+            byte_str = f'[red]{byte_str}[/red]'
+        elif slot_info['byte_pct'] > 90:
+            status = '[yellow]TIGHT[/yellow]'
+        else:
+            status = '[green]OK[/green]'
+
+        table.add_row(
+            str(slot_info['slot']),
+            slot_info['content'] or '[dim](empty)[/dim]',
+            byte_str,
+            str(slot_info['word_count']),
+            status,
+        )
+
+    console.print(table)
+
+    # Utilization
+    console.print(
+        f'\n[bold]Space utilization:[/bold] '
+        f"{result['utilization_pct']}% "
+        f"({result['total_bytes_used']}/{result['total_capacity']} bytes)"
+    )
+    console.print(
+        f"[bold]Unique words:[/bold] {result['unique_words']}"
+    )
+
+    # Warnings
+    if result['warnings']:
+        console.print('\n[bold yellow]Warnings:[/bold yellow]')
+        for w in result['warnings']:
+            console.print(f'  [yellow]⚠ {w}[/yellow]')
+
+    # Suggestions
+    if result['suggestions']:
+        console.print('\n[bold cyan]Suggestions:[/bold cyan]')
+        for s in result['suggestions']:
+            console.print(f'  [cyan]→ {s}[/cyan]')
+
+    # Genre trope suggestions
+    if genre:
+        console.print()
+        existing = [s for s in slots if s]
+        tropes = suggest_trope_keywords(genre, existing_keywords=existing)
+        if tropes:
+            console.print(
+                f'[bold green]Trope keywords for "{genre}":[/bold green]'
+            )
+            trope_table = Table(show_lines=False, expand=True)
+            trope_table.add_column('#', style='dim', width=3, justify='right')
+            trope_table.add_column('Keyword', style='bold', ratio=3)
+            trope_table.add_column('Bytes', justify='right', width=6)
+
+            for i, trope in enumerate(tropes, 1):
+                byte_count = len(trope.encode('utf-8'))
+                trope_table.add_row(str(i), trope, str(byte_count))
+
+            console.print(trope_table)
+            console.print(
+                '\n[dim]These trope keywords help Amazon\'s Rufus AI '
+                'match your book to semantic reader queries.[/dim]'
+            )
+        else:
+            console.print(
+                f'[dim]No additional trope suggestions for "{genre}" — '
+                f'your keywords already cover the common tropes.[/dim]'
+            )
+
+
+@main.command('niche-score')
+@click.argument('keywords', nargs=-1, required=True)
+@click.option(
+    '--department', type=click.Choice(['kindle', 'books']),
+    default='kindle', help='Amazon department to search.',
+)
+@click.option(
+    '--top-n', type=int, default=10,
+    help='Number of top results to analyze per keyword.',
+)
+def niche_score(keywords, department, top_n):
+    """Score keyword niches by analyzing Amazon search competition.
+
+    Searches Amazon for each KEYWORD, analyzes the top results'
+    BSR, review counts, and estimated revenue, then computes a
+    composite opportunity score (0-100).
+
+    Higher score = better opportunity (low competition + validated demand).
+
+    Examples:
+        kdp-scout niche-score "ancient civilizations thriller"
+        kdp-scout niche-score "cozy mystery" "small town romance" "dark academia"
+        kdp-scout niche-score "plague fiction" --department books
+    """
+    from kdp_scout.niche_scorer import score_niche
+
+    console.print(
+        Panel(
+            f'[bold]Keywords:[/bold] {", ".join(keywords)}\n'
+            f'[bold]Department:[/bold] {department}\n'
+            f'[bold]Top results analyzed:[/bold] {top_n}',
+            title='[bold cyan]KDP Scout - Niche Scorecard[/bold cyan]',
+            border_style='cyan',
+        )
+    )
+    console.print()
+
+    results = []
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn('[progress.description]{task.description}'),
+        BarColumn(),
+        TextColumn('[progress.percentage]{task.percentage:>3.0f}%'),
+        console=console,
+    ) as progress:
+        task = progress.add_task('Analyzing niches...', total=len(keywords))
+
+        for keyword in keywords:
+            progress.update(task, description=f'Scoring "{keyword}"...')
+
+            result = score_niche(keyword, department=department, top_n=top_n)
+            if result:
+                results.append(result)
+            else:
+                console.print(
+                    f'\n[yellow]Could not analyze "{keyword}" '
+                    f'(search failed or CAPTCHA).[/yellow]'
+                )
+
+            progress.advance(task)
+
+    if not results:
+        console.print('[red]No niches could be analyzed.[/red]')
+        return
+
+    # Sort by opportunity score
+    results.sort(key=lambda x: x['opportunity_score'], reverse=True)
+
+    # Summary table
+    console.print()
+    table = Table(
+        title='Niche Opportunity Scorecard',
+        show_lines=True,
+        expand=True,
+    )
+    table.add_column('#', style='dim', width=3, justify='right')
+    table.add_column('Keyword', style='bold', ratio=3, no_wrap=False)
+    table.add_column('Score', justify='center', width=7)
+    table.add_column('Avg BSR', justify='right', width=10)
+    table.add_column('Avg Reviews', justify='right', width=11)
+    table.add_column('Avg Price', justify='right', width=9)
+    table.add_column('Est. Rev/Mo', justify='right', width=11)
+    table.add_column('Verdict', ratio=2, no_wrap=False)
+
+    for i, r in enumerate(results, 1):
+        m = r['metrics']
+        score_val = r['opportunity_score']
+
+        # Color-code score
+        if score_val >= 70:
+            score_str = f'[bold green]{score_val:.0f}[/bold green]'
+        elif score_val >= 50:
+            score_str = f'[green]{score_val:.0f}[/green]'
+        elif score_val >= 30:
+            score_str = f'[yellow]{score_val:.0f}[/yellow]'
+        else:
+            score_str = f'[red]{score_val:.0f}[/red]'
+
+        avg_bsr = f"{m['avg_bsr']:,}" if m['avg_bsr'] else '-'
+        avg_reviews = f"{m['avg_reviews']:.0f}" if m['avg_reviews'] is not None else '-'
+        avg_price = f"${m['avg_price']:.2f}" if m['avg_price'] else '-'
+        est_rev = (f"${m['avg_monthly_revenue']:,.0f}"
+                   if m['avg_monthly_revenue'] else '-')
+
+        # Short verdict
+        if score_val >= 70:
+            verdict = '[bold green]STRONG[/bold green]'
+        elif score_val >= 50:
+            verdict = '[green]MODERATE[/green]'
+        elif score_val >= 30:
+            verdict = '[yellow]CHALLENGING[/yellow]'
+        else:
+            verdict = '[red]AVOID[/red]'
+
+        table.add_row(
+            str(i), r['keyword'], score_str,
+            avg_bsr, avg_reviews, avg_price, est_rev, verdict,
+        )
+
+    console.print(table)
+
+    # Detailed breakdown for each result
+    for r in results:
+        console.print()
+        console.print(
+            Panel(
+                r['recommendation'],
+                title=f"[bold]{r['keyword']}[/bold] — Score: {r['opportunity_score']:.0f}/100",
+                border_style='cyan',
+            )
+        )
+
+        # Top results detail
+        if r['results']:
+            detail_table = Table(show_lines=False, expand=True)
+            detail_table.add_column('#', style='dim', width=3, justify='right')
+            detail_table.add_column('Title', ratio=4, no_wrap=False)
+            detail_table.add_column('Reviews', justify='right', width=8)
+            detail_table.add_column('Rating', justify='center', width=6)
+            detail_table.add_column('Price', justify='right', width=7)
+
+            for j, book in enumerate(r['results'][:10], 1):
+                title_text = book['title'] or 'Unknown'
+                if len(title_text) > 50:
+                    title_text = title_text[:47] + '...'
+                reviews = str(book['review_count']) if book['review_count'] else '-'
+                rating = f"{book['avg_rating']:.1f}" if book['avg_rating'] else '-'
+                price = f"${book['price']:.2f}" if book['price'] else '-'
+
+                detail_table.add_row(
+                    str(j), title_text, reviews, rating, price,
+                )
+
+            console.print(detail_table)
+
+
+@main.command('category-finder')
+@click.argument('keyword')
+@click.option(
+    '--target-sales', type=float, default=5.0,
+    help='Your projected daily sales during launch (default: 5).',
+)
+@click.option(
+    '--department', type=click.Choice(['kindle', 'books']),
+    default='kindle', help='Amazon department to search.',
+)
+def category_finder(keyword, target_sales, department):
+    """Find beatable Amazon categories for your launch velocity.
+
+    Analyzes search results for KEYWORD, extracts category paths,
+    and estimates what sales velocity is needed to reach the top 20
+    in each category. Categories where your projected launch velocity
+    would place you in the top 20 are marked as "beatable."
+
+    Examples:
+        kdp-scout category-finder "historical thriller"
+        kdp-scout category-finder "cozy mystery" --target-sales 10
+        kdp-scout category-finder "dark romance" --department books
+    """
+    from kdp_scout.niche_scorer import find_beatable_categories
+
+    console.print(
+        Panel(
+            f'[bold]Keyword:[/bold] {keyword}\n'
+            f'[bold]Target daily sales:[/bold] {target_sales}\n'
+            f'[bold]Department:[/bold] {department}',
+            title='[bold cyan]KDP Scout - Category Finder[/bold cyan]',
+            border_style='cyan',
+        )
+    )
+    console.print()
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn('[progress.description]{task.description}'),
+        console=console,
+    ) as progress:
+        progress.add_task(f'Analyzing categories for "{keyword}"...', total=None)
+        categories = find_beatable_categories(
+            keyword,
+            target_daily_sales=target_sales,
+            department=department,
+        )
+
+    if not categories:
+        console.print(
+            '[yellow]No category data found. This can happen if:\n'
+            '  - Amazon served a CAPTCHA\n'
+            '  - The search returned no results\n'
+            '  - Category data was not extractable from results[/yellow]'
+        )
+        return
+
+    # Results table
+    console.print()
+    table = Table(
+        title=f'Category Analysis: "{keyword}"',
+        show_lines=True,
+        expand=True,
+    )
+    table.add_column('#', style='dim', width=3, justify='right')
+    table.add_column('Category', style='bold', ratio=4, no_wrap=False)
+    table.add_column('Est. BSR #20', justify='right', width=12)
+    table.add_column('Sales/Day #20', justify='right', width=13)
+    table.add_column('Beatable?', justify='center', width=10)
+    table.add_column('Headroom', justify='right', width=10)
+    table.add_column('Samples', justify='center', width=8)
+
+    beatable_count = 0
+    for i, cat in enumerate(categories, 1):
+        bsr_str = f"{cat['bsr_at_20']:,}"
+        daily_str = f"{cat['daily_sales_at_20']:.1f}"
+
+        if cat['beatable']:
+            beatable_count += 1
+            beatable_str = '[bold green]YES[/bold green]'
+            headroom_str = f"[green]+{cat['headroom']:.1f}[/green]"
+        else:
+            beatable_str = '[red]NO[/red]'
+            headroom_str = f"[red]{cat['headroom']:.1f}[/red]"
+
+        table.add_row(
+            str(i), cat['category'], bsr_str, daily_str,
+            beatable_str, headroom_str, str(cat['sample_size']),
+        )
+
+    console.print(table)
+
+    console.print(
+        f'\n[bold]{beatable_count}/{len(categories)} categories[/bold] are beatable '
+        f'with {target_sales:.0f} daily sales.'
+    )
+
+    if beatable_count > 0:
+        console.print(
+            '\n[dim]Tip: Choose 2-3 beatable categories when publishing on KDP. '
+            'Reaching top 20 triggers Amazon\'s visibility boost algorithm.[/dim]'
+        )
+    else:
+        console.print(
+            '\n[dim]Tip: Try increasing --target-sales or searching for '
+            'more niche keywords to find beatable categories.[/dim]'
+        )
 
 
 # -- Phase 5: Automation, Seeds, Cron --------------------------------------

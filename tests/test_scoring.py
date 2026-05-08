@@ -302,7 +302,7 @@ class TestWeights:
             'autocomplete', 'competition', 'bsr_demand',
             'ads_impressions', 'ads_orders', 'ads_profitability',
             'search_volume', 'commercial_value', 'click_through_rate',
-            'own_ranking',
+            'own_ranking', 'semantic_relevance',
         }
         assert set(DEFAULT_WEIGHTS.keys()) == expected
 
@@ -388,8 +388,12 @@ class TestScoreKeyword:
         score = scorer.score_keyword(1)
         assert 0.0 <= score <= 100.0
 
-    def test_perfect_score_is_100(self, scorer):
-        """All signals at maximum should produce exactly 100."""
+    def test_perfect_score_is_90(self, scorer):
+        """All non-semantic signals at maximum should produce 90.
+
+        The remaining 10% is from semantic_relevance which requires
+        separate semantic analysis to populate.
+        """
         scorer._repo.get_keyword_with_metrics.return_value = make_keyword_row(
             autocomplete_position=1,
             competition_count=0,
@@ -403,36 +407,36 @@ class TestScoreKeyword:
         scorer._repo.get_ads_acos_for_keyword.return_value = 0.0
         scorer._repo.get_own_ranking_for_keyword.return_value = 1
         score = scorer.score_keyword(1)
-        assert score == pytest.approx(100.0, abs=0.1)
+        assert score == pytest.approx(90.0, abs=0.1)
 
     # -- Autocomplete scoring in context --
 
     def test_autocomplete_only_position_1(self, scorer):
-        """Position 1 autocomplete with default weight (0.20) = 20 points."""
+        """Position 1 autocomplete with default weight (0.15) = 15 points."""
         scorer._repo.get_keyword_with_metrics.return_value = make_keyword_row(
             autocomplete_position=1,
         )
         score = scorer.score_keyword(1)
-        assert score == pytest.approx(20.0, abs=0.1)
+        assert score == pytest.approx(15.0, abs=0.1)
 
     def test_autocomplete_only_position_5(self, scorer):
-        """Position 5 = 0.6 normalized * 0.20 weight * 100 = 12.0."""
+        """Position 5 = 0.6 normalized * 0.15 weight * 100 = 9.0."""
         scorer._repo.get_keyword_with_metrics.return_value = make_keyword_row(
             autocomplete_position=5,
         )
         score = scorer.score_keyword(1)
-        assert score == pytest.approx(12.0, abs=0.1)
+        assert score == pytest.approx(9.0, abs=0.1)
 
     # -- Combined scoring tests --
 
     def test_autocomplete_and_orders(self, scorer):
-        """Autocomplete pos 1 (20.0) + 1000 orders (15.0) = 35.0."""
+        """Autocomplete pos 1 (15.0) + 1000 orders (15.0) = 30.0."""
         scorer._repo.get_keyword_with_metrics.return_value = make_keyword_row(
             autocomplete_position=1,
             orders=1000,
         )
         score = scorer.score_keyword(1)
-        assert score == pytest.approx(35.0, abs=0.1)
+        assert score == pytest.approx(30.0, abs=0.1)
 
     def test_with_acos_data(self, scorer):
         """ACOS cross-reference contributes to score."""
@@ -441,8 +445,8 @@ class TestScoreKeyword:
         )
         scorer._repo.get_ads_acos_for_keyword.return_value = 0.35  # 35% ACOS
         score = scorer.score_keyword(1)
-        # 20.0 from autocomplete + 6.5 from ACOS (0.65 * 0.10 * 100)
-        assert score == pytest.approx(26.5, abs=0.1)
+        # 15.0 from autocomplete + 6.5 from ACOS (0.65 * 0.10 * 100)
+        assert score == pytest.approx(21.5, abs=0.1)
 
     def test_with_own_ranking(self, scorer):
         """Own ranking cross-reference contributes to score."""
@@ -451,8 +455,8 @@ class TestScoreKeyword:
         )
         scorer._repo.get_own_ranking_for_keyword.return_value = 1
         score = scorer.score_keyword(1)
-        # 20.0 from autocomplete + 5.0 from ranking (1.0 * 0.05 * 100)
-        assert score == pytest.approx(25.0, abs=0.1)
+        # 15.0 from autocomplete + 5.0 from ranking (1.0 * 0.05 * 100)
+        assert score == pytest.approx(20.0, abs=0.1)
 
     # -- Edge cases --
 
@@ -472,8 +476,8 @@ class TestScoreKeyword:
             autocomplete_position=3,
         )
         score = scorer.score_keyword(1)
-        # 0.8 * 0.20 * 100 = 16.0
-        assert score == pytest.approx(16.0, abs=0.1)
+        # 0.8 * 0.15 * 100 = 12.0
+        assert score == pytest.approx(12.0, abs=0.1)
 
     def test_none_values_dont_crash(self, scorer):
         """All None values should produce 0 score without errors."""
