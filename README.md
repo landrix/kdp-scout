@@ -45,7 +45,7 @@ Built for self-published authors who want data-driven keyword targeting without 
 - User-agent rotation
 - Proxy support
 - SQLite local storage (no cloud, no accounts, no telemetry)
-- Multi-marketplace support (Amazon.com, .de, .co.uk, .fr, .es, .it)
+- Multi-marketplace support (Amazon.com, .ca, .com.au, .de, .co.uk, .fr, .es, .it)
 - Free tier covers everything; optional DataForSEO for actual search volumes
 
 ## Installation
@@ -298,7 +298,7 @@ DATAFORSEO_RATE_LIMIT=0.5
 # Database location
 DB_PATH=data/kdp_scout.db
 
-# Amazon marketplace (us, de, uk, fr, es, it)
+# Amazon marketplace (us, ca, au, de, uk, fr, es, it)
 MARKETPLACE=us
 
 # Logging level
@@ -322,11 +322,15 @@ Supported marketplaces:
 | Code | Marketplace |
 |------|-------------|
 | `us` | Amazon.com (default) |
+| `ca` | Amazon.ca |
+| `au` | Amazon.com.au |
 | `de` | Amazon.de |
 | `uk` | Amazon.co.uk |
 | `fr` | Amazon.fr |
 | `es` | Amazon.es |
 | `it` | Amazon.it |
+
+Canada and Australia currently reuse the `us_kindle` BSR model, so sales and revenue estimates there should be treated as approximate.
 
 ## Automation Setup
 
